@@ -221,10 +221,10 @@ def main():
     unknown_cfg = read_args(argv)
     cfg = SimpleNamespace(**{**{k: v for d in cfg.values() for k, v in d.items()}, **unknown_cfg})
 
-    if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' and cfg.mixed_precision == 'bf16' and not torch.cuda.is_bf16_supported():
-        cfg.mixed_precision = 'fp16'
-        cfg.gradient_accumulation_steps = 1
-        print("Note: bf16 is not available on this hardware! Reverting to fp16 and setting accumulation steps to 1.")
+    # if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' and cfg.mixed_precision == 'bf16' and not torch.cuda.is_bf16_supported():
+    #     cfg.mixed_precision = 'fp16'
+    #     cfg.gradient_accumulation_steps = 1
+    #     print("Note: bf16 is not available on this hardware! Reverting to fp16 and setting accumulation steps to 1.")
 
     # set seeds
     random.seed(cfg.seed)
@@ -234,10 +234,33 @@ def main():
 
     use_val_set = hasattr(cfg, 'val_size')
 
+    # accelerator = accelerate.Accelerator(
+    #     mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' else None,
+    #     gradient_accumulation_steps=cfg.gradient_accumulation_steps
+    # )
+
+    # --- mixed_precision の最終決定 ---
+    mp = getattr(cfg, 'mixed_precision', 'no')  # 未指定なら 'no'
+    # 期待外の値は 'no' に
+    if mp not in ('fp16', 'bf16', 'no'):
+        mp = 'no'
+
+    # MPS や CPU のときは混合精度を使わない
+    if (not torch.cuda.is_available()) or torch.backends.mps.is_available():
+        mp = 'no'
+
+    # bf16 が CUDA で使えない環境なら fp16 へ（従来のロジック）
+    if torch.cuda.is_available() and mp == 'bf16' and not torch.cuda.is_bf16_supported():
+        mp = 'fp16'
+        cfg.gradient_accumulation_steps = 1
+        print("Note: CUDA bf16 not available; falling back to fp16.")
+
+    # --- Accelerator 生成（ここが重要！None を渡さず 'no' を渡す）---
     accelerator = accelerate.Accelerator(
-        mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' else None,
+        mixed_precision=mp,  # None にしない
         gradient_accumulation_steps=cfg.gradient_accumulation_steps
     )
+
     # https://github.com/huggingface/transformers/issues/26548
     accelerator.dataloader_config.dispatch_batches = False
 
