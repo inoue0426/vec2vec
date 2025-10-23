@@ -113,14 +113,35 @@ def get_world_size() -> int:
     except (RuntimeError, ValueError):
         return 1
 
-def get_num_proc() -> int:
-    world_size: int = torch.cuda.device_count()
+def _get_world_size() -> int:
+    # 1) env 優先
     try:
-        # os.sched_getaffinity respects schedulers, unlike cpu_count(), but it's only available
-        # on some Unix platforms, so we support both!
-        return len(os.sched_getaffinity(0)) // world_size  # type: ignore[attr-defined]
+        ws_env = int(os.environ.get("WORLD_SIZE", "1"))
+    except ValueError:
+        ws_env = 1
+    ws = max(ws_env, 1)
+
+    # 2) torch.distributed が初期化済みならそれを採用（より正確）
+    try:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized():
+            ws = max(ws, dist.get_world_size())
+    except Exception:
+        pass
+
+    return max(ws, 1)
+
+def get_num_proc() -> int:
+    world_size = _get_world_size()           # ← ここで必ず >=1
+    # CPU 論理コア数の取得（macOS でもOK）
+    try:
+        n_cpus = len(os.sched_getaffinity(0))  # Linux ならこちらが速い
     except AttributeError:
-        return multiprocessing.cpu_count() // world_size
+        n_cpus = os.cpu_count() or multiprocessing.cpu_count() or 1
+
+    # DataLoader の workers を世界サイズで割る
+    num = n_cpus // world_size
+    return max(1, num)                       # ← 常に 1 以上
     
 
 def load_translator_from_hf(model_id):
