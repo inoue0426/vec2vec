@@ -142,13 +142,25 @@ def training_loop_(
                 cc_trans_loss = torch.tensor(0.0)
                 cc_vsp_loss = torch.tensor(0.0)
 
+            '''
+            Params from configs/unsupervised.toml
+            
+            loss_coefficient_reverse_rec = 0.0
+            loss_coefficient_rec = 1.0
+            loss_coefficient_vsp = 1.0
+            loss_coefficient_cc_trans = 10.0
+            loss_coefficient_cc_rec = 0.0
+            loss_coefficient_cc_vsp = 10.0
+            loss_coefficient_r1_penalty = 0.0
+            '''
+            
             loss = (
-                + (rec_loss * cfg.loss_coefficient_rec)
-                + (reverse_rec_loss * cfg.loss_coefficient_reverse_rec)
-                + (vsp_loss * cfg.loss_coefficient_vsp)
-                + (cc_vsp_loss * cfg.loss_coefficient_cc_vsp)
-                + (cc_rec_loss * cfg.loss_coefficient_cc_rec)
-                + (cc_trans_loss * cfg.loss_coefficient_cc_trans)
+                + (rec_loss * cfg.loss_coefficient_rec) # used
+                + (reverse_rec_loss * cfg.loss_coefficient_reverse_rec) # not used 
+                + (vsp_loss * cfg.loss_coefficient_vsp)  # used
+                + (cc_vsp_loss * cfg.loss_coefficient_cc_vsp) # used
+                + (cc_rec_loss * cfg.loss_coefficient_cc_rec) # not used 
+                + (cc_trans_loss * cfg.loss_coefficient_cc_trans)  # used
                 + (gen_loss * cfg.loss_coefficient_gen)
                 + (sup_gen_loss * cfg.loss_coefficient_gen)
                 + (latent_gen_loss * cfg.loss_coefficient_latent_gen)
