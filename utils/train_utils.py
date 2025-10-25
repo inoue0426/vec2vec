@@ -102,6 +102,11 @@ def vsp_loss_fn(ins, translations, logger) -> torch.Tensor:
             A = translations[out_name][in_name]
             A = A / (A.norm(dim=1, keepdim=True) + EPS)
             out_sims = A @ A.T
+
+            '''
+            [MEMO] out_sims_reflected is not in the paper.
+            '''
+            
             out_sims_reflected = A @ B.T
             vsp_loss = (in_sims - out_sims).abs().mean()
             vsp_loss_reflected = (in_sims - out_sims_reflected).abs().mean()
