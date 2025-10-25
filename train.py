@@ -89,6 +89,8 @@ def training_loop_(
                 fake_data=reps[cfg.unsup_emb]
             )
 
+            # [MEMO] This parameter is not in the paper, but this is a hyperparameter, so the algorithm sometimes uses it, sometimes not.
+            # loss_coefficient_similarity_gen default is 0; ignoring this loss.
             # similarity discriminator
             if cfg.loss_coefficient_similarity_gen > 0:
                 real_sims_A = ins[cfg.sup_emb] @ ins[cfg.sup_emb].T
