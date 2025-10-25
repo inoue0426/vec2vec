@@ -161,7 +161,7 @@ def training_loop_(
                 + (cc_vsp_loss * cfg.loss_coefficient_cc_vsp) # used
                 + (cc_rec_loss * cfg.loss_coefficient_cc_rec) # not used 
                 + (cc_trans_loss * cfg.loss_coefficient_cc_trans)  # used
-                + (gen_loss * cfg.loss_coefficient_gen)
+                + (gen_loss * cfg.loss_coefficient_gen) # used
                 + (sup_gen_loss * cfg.loss_coefficient_gen)
                 + (latent_gen_loss * cfg.loss_coefficient_latent_gen)
                 + (similarity_gen_loss * cfg.loss_coefficient_similarity_gen)
