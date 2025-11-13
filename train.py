@@ -17,7 +17,14 @@ from translators.Discriminator import Discriminator
 # from eval import eval_model
 from utils.collate import MultiencoderTokenizedDataset, TokenizedCollator
 from utils.eval_utils import EarlyStopper, eval_loop_
-from utils.gan import LeastSquaresGAN, RelativisticGAN, VanillaGAN, WassersteinGAN_GP, MMDGAN, CauchySchwarzGAN
+from utils.gan import (
+    LeastSquaresGAN,
+    RelativisticGAN,
+    VanillaGAN,
+    WassersteinGAN_GP,
+    MMDGAN,
+    CauchySchwarzGAN,
+)
 from utils.model_utils import get_sentence_embedding_dimension, load_encoder
 from utils.utils import *
 from utils.streaming_utils import load_streaming_embeddings, process_batch
@@ -26,9 +33,37 @@ from utils.wandb_logger import Logger
 
 from datasets import load_from_disk
 
+
 def training_loop_(
-    save_dir, accelerator, gan, sup_gan, latent_gan, similarity_gan, translator, sup_dataloader, sup_iter, unsup_dataloader, sup_encs, unsup_enc, cfg, opt, scheduler, logger=None, max_num_batches=None
+    save_dir,
+    accelerator,
+    gan,
+    sup_gan,
+    latent_gan,
+    similarity_gan,
+    translator,
+    sup_dataloader,
+    sup_iter,
+    unsup_dataloader,
+    sup_encs,
+    unsup_enc,
+    cfg,
+    opt,
+    scheduler,
+    logger=None,
+    max_num_batches=None,
 ):
+
+    use_gan = any(
+        getattr(cfg, k, 0.0) > 0.0
+        for k in [
+            "loss_coefficient_disc",  # ← 追加
+            "loss_coefficient_gen",
+            "loss_coefficient_latent_gen",
+            "loss_coefficient_similarity_gen",
+        ]
+    )
+
     device = accelerator.device
     if logger is None:
         logger = Logger(dummy=True)
@@ -40,10 +75,10 @@ def training_loop_(
     else:
         dataloader_pbar = zip(sup_dataloader, unsup_dataloader)
 
-
-    dataloader_pbar = tqdm(dataloader_pbar, total=len(unsup_dataloader), desc="Training")
-
-    model_save_dir = os.path.join(save_dir, 'model.pt')
+    dataloader_pbar = tqdm(
+        dataloader_pbar, total=len(unsup_dataloader), desc="Training"
+    )
+    model_save_dir = os.path.join(save_dir, "model.pt")
 
     translator.train()
     for i, batches in enumerate(dataloader_pbar):
@@ -51,7 +86,7 @@ def training_loop_(
             try:
                 sup_batch = next(sup_iter)
             except StopIteration:
-                print('Restarting sup_dataloader...')
+                print("Restarting sup_dataloader...")
                 sup_iter = iter(sup_dataloader)
                 sup_batch = next(sup_iter)
             unsup_batch = batches
@@ -62,57 +97,101 @@ def training_loop_(
             print(f"Early stopping at {i} batches")
             break
         with accelerator.accumulate(translator), accelerator.autocast():
-            assert len(set(sup_batch.keys()).intersection(unsup_batch.keys())) == 0
+            required = {"x_gene", "x_drug"}
+            assert (
+                set(sup_batch.keys()) == required
+                and set(unsup_batch.keys()) == required
+            )
             ins = {
-                **process_batch(sup_batch, sup_encs, cfg.normalize_embeddings, device), 
-                **process_batch(unsup_batch, unsup_enc, cfg.normalize_embeddings, device)
+                **process_batch(sup_batch, sup_encs, cfg.normalize_embeddings, device),
+                **process_batch(
+                    unsup_batch, unsup_enc, cfg.normalize_embeddings, device
+                ),
             }
 
             recons, translations, reps = translator(
                 ins, noise_level=cfg.noise_level, include_reps=True
             )
 
-            # discriminator
-            disc_r1_penalty, disc_loss, gen_loss, disc_acc_real, disc_acc_fake, gen_acc = gan.step(
-                real_data=ins[cfg.unsup_emb] + torch.randn_like(ins[cfg.unsup_emb], device=ins[cfg.unsup_emb].device) * cfg.noise_level,
-                fake_data=translations[cfg.unsup_emb][cfg.sup_emb] + torch.randn_like(translations[cfg.unsup_emb][cfg.sup_emb], device=translations[cfg.unsup_emb][cfg.sup_emb].device) * cfg.noise_level
+            z = torch.tensor(0.0, device=device)
+            disc_r1_penalty = disc_loss = gen_loss = z
+            sup_disc_r1_penalty = sup_disc_loss = sup_gen_loss = z
+            latent_disc_r1_penalty = latent_disc_loss = latent_gen_loss = z
+            similarity_r1_penalty = similarity_disc_loss = similarity_gen_loss = z
+
+            disc_acc_real = disc_acc_fake = gen_acc = 0.0
+            sup_disc_acc_real = sup_disc_acc_fake = sup_gen_acc = 0.0
+            latent_disc_acc_real = latent_disc_acc_fake = latent_gen_acc = 0.0
+            similarity_disc_acc_real = similarity_disc_acc_fake = similarity_gen_acc = (
+                0.0
             )
 
-            sup_disc_r1_penalty, sup_disc_loss, sup_gen_loss, sup_disc_acc_real, sup_disc_acc_fake, sup_gen_acc = sup_gan.step(
-                real_data=ins[cfg.sup_emb] + torch.randn_like(ins[cfg.sup_emb], device=ins[cfg.sup_emb].device) * cfg.noise_level,
-                fake_data=translations[cfg.sup_emb][cfg.unsup_emb] + torch.randn_like(translations[cfg.sup_emb][cfg.unsup_emb], device=translations[cfg.sup_emb][cfg.unsup_emb].device) * cfg.noise_level,
-            )
+            if use_gan:
+                # discriminator
+                (
+                    disc_r1_penalty,
+                    disc_loss,
+                    gen_loss,
+                    disc_acc_real,
+                    disc_acc_fake,
+                    gen_acc,
+                ) = gan.step(
+                    real_data=ins[cfg.unsup_emb]
+                    + torch.randn_like(ins[cfg.unsup_emb]) * cfg.noise_level,
+                    fake_data=translations[cfg.unsup_emb][cfg.sup_emb]
+                    + torch.randn_like(translations[cfg.unsup_emb][cfg.sup_emb])
+                    * cfg.noise_level,
+                )
 
-            # latent discriminator
-            latent_disc_r1_penalty, latent_disc_loss, latent_gen_loss, latent_disc_acc_real, latent_disc_acc_fake, latent_gen_acc = latent_gan.step(
-                real_data=reps[cfg.sup_emb],
-                fake_data=reps[cfg.unsup_emb]
-            )
+                (
+                    sup_disc_r1_penalty,
+                    sup_disc_loss,
+                    sup_gen_loss,
+                    sup_disc_acc_real,
+                    sup_disc_acc_fake,
+                    sup_gen_acc,
+                ) = sup_gan.step(
+                    real_data=ins[cfg.sup_emb]
+                    + torch.randn_like(ins[cfg.sup_emb]) * cfg.noise_level,
+                    fake_data=translations[cfg.sup_emb][cfg.unsup_emb]
+                    + torch.randn_like(translations[cfg.sup_emb][cfg.unsup_emb])
+                    * cfg.noise_level,
+                )
 
-            # [MEMO] This parameter is not in the paper, but this is a hyperparameter, so the algorithm sometimes uses it, sometimes not.
-            # loss_coefficient_similarity_gen default is 0; ignoring this loss.
-            # similarity discriminator
-            if cfg.loss_coefficient_similarity_gen > 0:
-                real_sims_A = ins[cfg.sup_emb] @ ins[cfg.sup_emb].T
-                fake_sims_A = (
-                    translations[cfg.sup_emb][cfg.unsup_emb] @ translations[cfg.sup_emb][cfg.unsup_emb].T
+                (
+                    latent_disc_r1_penalty,
+                    latent_disc_loss,
+                    latent_gen_loss,
+                    latent_disc_acc_real,
+                    latent_disc_acc_fake,
+                    latent_gen_acc,
+                ) = latent_gan.step(
+                    real_data=reps[cfg.sup_emb], fake_data=reps[cfg.unsup_emb]
                 )
-                real_sims_B = ins[cfg.unsup_emb] @ ins[cfg.unsup_emb].T
-                fake_sims_B = (
-                    translations[cfg.unsup_emb][cfg.sup_emb] @ translations[cfg.unsup_emb][cfg.sup_emb].T
-                )
-                similarity_r1_penalty, similarity_disc_loss, similarity_gen_loss, similarity_disc_acc_real, similarity_disc_acc_fake, similarity_gen_acc = similarity_gan.step(
-                    real_data=torch.cat([real_sims_A, real_sims_B], dim=1),
-                    fake_data=torch.cat([fake_sims_A, fake_sims_B], dim=1)
-                )
-            else:
-                similarity_r1_penalty = torch.tensor(0.0)
-                similarity_disc_loss = torch.tensor(0.0)
-                similarity_gen_loss = torch.tensor(0.0)
-                similarity_disc_acc_real = 0.0
-                similarity_disc_acc_fake = 0.0
-                similarity_gen_acc = 0.0
-            
+
+                if getattr(cfg, "loss_coefficient_similarity_gen", 0.0) > 0:
+                    real_sims_A = ins[cfg.sup_emb] @ ins[cfg.sup_emb].T
+                    fake_sims_A = (
+                        translations[cfg.sup_emb][cfg.unsup_emb]
+                        @ translations[cfg.sup_emb][cfg.unsup_emb].T
+                    )
+                    real_sims_B = ins[cfg.unsup_emb] @ ins[cfg.unsup_emb].T
+                    fake_sims_B = (
+                        translations[cfg.unsup_emb][cfg.sup_emb]
+                        @ translations[cfg.unsup_emb][cfg.sup_emb].T
+                    )
+                    (
+                        similarity_r1_penalty,
+                        similarity_disc_loss,
+                        similarity_gen_loss,
+                        similarity_disc_acc_real,
+                        similarity_disc_acc_fake,
+                        similarity_gen_acc,
+                    ) = similarity_gan.step(
+                        real_data=torch.cat([real_sims_A, real_sims_B], dim=1),
+                        fake_data=torch.cat([fake_sims_A, fake_sims_B], dim=1),
+                    )
+
             rec_loss = rec_loss_fn(ins, recons, logger)
             ins_reversed = {
                 cfg.sup_emb: ins[cfg.unsup_emb],
@@ -122,10 +201,12 @@ def training_loop_(
                 cfg.sup_emb: translations[cfg.unsup_emb][cfg.sup_emb],
                 cfg.unsup_emb: translations[cfg.sup_emb][cfg.unsup_emb],
             }
-            reverse_rec_loss = rec_loss_fn(ins_reversed, translations_as_recons, logger, prefix="reverse_")
+            reverse_rec_loss = rec_loss_fn(
+                ins_reversed, translations_as_recons, logger, prefix="reverse_"
+            )
 
-            recons_as_translations = { 
-                in_name: { in_name: val } for in_name, val in recons.items() 
+            recons_as_translations = {
+                in_name: {in_name: val} for in_name, val in recons.items()
             }
             vsp_loss = vsp_loss_fn(ins, recons_as_translations, logger)
             if (cfg.loss_coefficient_cc_rec > 0) or (cfg.loss_coefficient_cc_trans > 0):
@@ -135,14 +216,16 @@ def training_loop_(
                     cc_ins[out_flag] = translations[out_flag][in_flag].detach()
                 cc_recons, cc_translations = translator(cc_ins)
                 cc_rec_loss = rec_loss_fn(ins, cc_recons, logger, prefix="cc_")
-                cc_trans_loss = trans_loss_fn(ins, cc_translations, logger, prefix="cc_")
+                cc_trans_loss = trans_loss_fn(
+                    ins, cc_translations, logger, prefix="cc_"
+                )
                 cc_vsp_loss = vsp_loss_fn(ins, cc_translations, logger)
             else:
                 cc_rec_loss = torch.tensor(0.0)
                 cc_trans_loss = torch.tensor(0.0)
                 cc_vsp_loss = torch.tensor(0.0)
 
-            '''
+            """
             Params from configs/unsupervised.toml
             
             loss_coefficient_reverse_rec = 0.0
@@ -152,18 +235,18 @@ def training_loop_(
             loss_coefficient_cc_rec = 0.0
             loss_coefficient_cc_vsp = 10.0
             loss_coefficient_r1_penalty = 0.0
-            '''
-            
+            """
+
             loss = (
-                + (rec_loss * cfg.loss_coefficient_rec) # used
-                + (reverse_rec_loss * cfg.loss_coefficient_reverse_rec) # not used 
-                + (vsp_loss * cfg.loss_coefficient_vsp)  # used
-                + (cc_vsp_loss * cfg.loss_coefficient_cc_vsp) # used
-                + (cc_rec_loss * cfg.loss_coefficient_cc_rec) # not used 
-                + (cc_trans_loss * cfg.loss_coefficient_cc_trans)  # used
-                + (gen_loss * cfg.loss_coefficient_gen) # used
-                + (sup_gen_loss * cfg.loss_coefficient_gen)
-                + (latent_gen_loss * cfg.loss_coefficient_latent_gen)
+                +(rec_loss * cfg.loss_coefficient_rec)
+                + (reverse_rec_loss * cfg.loss_coefficient_reverse_rec)
+                + (vsp_loss * cfg.loss_coefficient_vsp)
+                + (cc_vsp_loss * cfg.loss_coefficient_cc_vsp)
+                + (cc_rec_loss * cfg.loss_coefficient_cc_rec)
+                + (cc_trans_loss * cfg.loss_coefficient_cc_trans)
+                + (gen_loss * cfg.loss_coefficient_gen)  # use_gan=Falseなら0
+                + (sup_gen_loss * cfg.loss_coefficient_gen)  # 同上
+                + (latent_gen_loss * cfg.loss_coefficient_latent_gen)  # 同上
                 + (similarity_gen_loss * cfg.loss_coefficient_similarity_gen)
             )
             exit_on_nan(loss)
@@ -171,59 +254,80 @@ def training_loop_(
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(translator.parameters(), cfg.max_grad_norm)
             grad_norm_generator = get_grad_norm(translator)
-            grad_norm_discriminator = get_grad_norm(gan.discriminator)
-            grad_norm_sup_discriminator = get_grad_norm(sup_gan.discriminator)
-            grad_norm_latent_discriminator = get_grad_norm(latent_gan.discriminator)
-            grad_norm_similarity_discriminator = get_grad_norm(similarity_gan.discriminator)
+            grad_norm_discriminator = (
+                get_grad_norm(gan.discriminator) if use_gan else 0.0
+            )
+            grad_norm_sup_discriminator = (
+                get_grad_norm(sup_gan.discriminator) if use_gan else 0.0
+            )
+            grad_norm_latent_discriminator = (
+                get_grad_norm(latent_gan.discriminator) if use_gan else 0.0
+            )
+            grad_norm_similarity_discriminator = (
+                get_grad_norm(similarity_gan.discriminator) if use_gan else 0.0
+            )
 
             opt.step()
             scheduler.step()
 
             metrics = {
-                "disc_loss": disc_loss.item(),
-                "disc_r1_penalty": disc_r1_penalty.item(),
-                "sup_disc_loss": sup_disc_loss.item(),
-                "sup_disc_r1_penalty": sup_disc_r1_penalty.item(),
-                "latent_disc_loss": latent_disc_loss.item(),
-                "latent_disc_r1_penalty": latent_disc_r1_penalty.item(),
-                "similarity_disc_loss": similarity_disc_loss.item(),
-                "similarity_r1_penalty": similarity_r1_penalty.item(),
                 "rec_loss": rec_loss.item(),
                 "reverse_rec_loss": reverse_rec_loss.item(),
                 "vsp_loss": vsp_loss.item(),
                 "cc_vsp_loss": cc_vsp_loss.item(),
                 "cc_rec_loss": cc_rec_loss.item(),
                 "cc_trans_loss": cc_trans_loss.item(),
-                "gen_loss": gen_loss.item(),
-                "sup_gen_loss": sup_gen_loss.item(),
-                "latent_gen_loss": latent_gen_loss.item(),
-                "similarity_gen_loss": similarity_gen_loss.item(),
                 "loss": loss.item(),
-                "grad_norm_generator": grad_norm_generator,
-                "grad_norm_discriminator": grad_norm_discriminator,
-                "grad_norm_sup_discriminator": grad_norm_sup_discriminator,
-                "grad_norm_latent_discriminator": grad_norm_latent_discriminator,
-                "grad_norm_similarity_discriminator": grad_norm_similarity_discriminator,
                 "learning_rate": opt.param_groups[0]["lr"],
-                "disc_acc_real": disc_acc_real,
-                "disc_acc_fake": disc_acc_fake,
-                "latent_disc_acc_real": latent_disc_acc_real,
-                "latent_disc_acc_fake": latent_disc_acc_fake,
-                "gen_acc": gen_acc,
-                "sup_disc_acc_real": sup_disc_acc_real,
-                "sup_disc_acc_fake": sup_disc_acc_fake,
-                "sup_gen_acc": sup_gen_acc,
-                "similarity_disc_acc_real": similarity_disc_acc_real,
-                "similarity_disc_acc_fake": similarity_disc_acc_fake,
-                "similarity_gen_acc": similarity_gen_acc,
+                "grad_norm_generator": grad_norm_generator,
+                "grad_norm_discriminator": (
+                    get_grad_norm(gan.discriminator) if use_gan else 0.0
+                ),
+                "grad_norm_sup_discriminator": (
+                    get_grad_norm(sup_gan.discriminator) if use_gan else 0.0
+                ),
+                "grad_norm_latent_discriminator": (
+                    get_grad_norm(latent_gan.discriminator) if use_gan else 0.0
+                ),
+                "grad_norm_similarity_discriminator": (
+                    get_grad_norm(similarity_gan.discriminator) if use_gan else 0.0
+                ),
             }
+            if use_gan:
+                metrics.update(
+                    {
+                        "disc_loss": disc_loss.item(),
+                        "disc_r1_penalty": disc_r1_penalty.item(),
+                        "sup_disc_loss": sup_disc_loss.item(),
+                        "sup_disc_r1_penalty": sup_disc_r1_penalty.item(),
+                        "latent_disc_loss": latent_disc_loss.item(),
+                        "latent_disc_r1_penalty": latent_disc_r1_penalty.item(),
+                        "similarity_disc_loss": similarity_disc_loss.item(),
+                        "similarity_r1_penalty": similarity_r1_penalty.item(),
+                        "gen_loss": gen_loss.item(),
+                        "sup_gen_loss": sup_gen_loss.item(),
+                        "latent_gen_loss": latent_gen_loss.item(),
+                        "similarity_gen_loss": similarity_gen_loss.item(),
+                        "disc_acc_real": disc_acc_real,
+                        "disc_acc_fake": disc_acc_fake,
+                        "latent_disc_acc_real": latent_disc_acc_real,
+                        "latent_disc_acc_fake": latent_disc_acc_fake,
+                        "gen_acc": gen_acc,
+                        "sup_disc_acc_real": sup_disc_acc_real,
+                        "sup_disc_acc_fake": sup_disc_acc_fake,
+                        "sup_gen_acc": sup_gen_acc,
+                        "similarity_disc_acc_real": similarity_disc_acc_real,
+                        "similarity_disc_acc_fake": similarity_disc_acc_fake,
+                        "similarity_gen_acc": similarity_gen_acc,
+                    }
+                )
 
             for metric, value in metrics.items():
                 logger.logkv(metric, value)
-            logger.dumpkvs(force=(hasattr(cfg, 'force_dump') and cfg.force_dump))
+            logger.dumpkvs(force=(hasattr(cfg, "force_dump") and cfg.force_dump))
             dataloader_pbar.set_postfix(metrics)
 
-    with open(save_dir + 'config.toml', 'w') as f:
+    with open(save_dir + "config.toml", "w") as f:
         toml.dump(cfg.__dict__, f)
     torch.save(accelerator.unwrap_model(translator).state_dict(), model_save_dir)
     return sup_iter
@@ -231,9 +335,11 @@ def training_loop_(
 
 def main():
     os.environ["TOKENIZERS_PARALLELISM"] = "0"
-    cfg = toml.load(f'configs/{argv[1]}.toml')
+    cfg = toml.load(f"configs/{argv[1]}.toml")
     unknown_cfg = read_args(argv)
-    cfg = SimpleNamespace(**{**{k: v for d in cfg.values() for k, v in d.items()}, **unknown_cfg})
+    cfg = SimpleNamespace(
+        **{**{k: v for d in cfg.values() for k, v in d.items()}, **unknown_cfg}
+    )
 
     # if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' and cfg.mixed_precision == 'bf16' and not torch.cuda.is_bf16_supported():
     #     cfg.mixed_precision = 'fp16'
@@ -246,7 +352,7 @@ def main():
     np.random.seed(cfg.seed)
     torch.cuda.manual_seed(cfg.seed)
 
-    use_val_set = hasattr(cfg, 'val_size')
+    use_val_set = hasattr(cfg, "val_size")
 
     # accelerator = accelerate.Accelerator(
     #     mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' else None,
@@ -254,35 +360,45 @@ def main():
     # )
 
     # --- mixed_precision の最終決定 ---
-    mp = getattr(cfg, 'mixed_precision', 'no')  # 未指定なら 'no'
+    mp = getattr(cfg, "mixed_precision", "no")  # 未指定なら 'no'
     # 期待外の値は 'no' に
-    if mp not in ('fp16', 'bf16', 'no'):
-        mp = 'no'
+    if mp not in ("fp16", "bf16", "no"):
+        mp = "no"
 
     # MPS や CPU のときは混合精度を使わない
     if (not torch.cuda.is_available()) or torch.backends.mps.is_available():
-        mp = 'no'
+        mp = "no"
 
     # bf16 が CUDA で使えない環境なら fp16 へ（従来のロジック）
-    if torch.cuda.is_available() and mp == 'bf16' and not torch.cuda.is_bf16_supported():
-        mp = 'fp16'
+    if (
+        torch.cuda.is_available()
+        and mp == "bf16"
+        and not torch.cuda.is_bf16_supported()
+    ):
+        mp = "fp16"
         cfg.gradient_accumulation_steps = 1
         print("Note: CUDA bf16 not available; falling back to fp16.")
 
     # --- Accelerator 生成（ここが重要！None を渡さず 'no' を渡す）---
     accelerator = accelerate.Accelerator(
         mixed_precision=mp,  # None にしない
-        gradient_accumulation_steps=cfg.gradient_accumulation_steps
+        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
     )
 
     # https://github.com/huggingface/transformers/issues/26548
     accelerator.dataloader_config.dispatch_batches = False
 
-    if hasattr(cfg, 'force_wandb_name') and cfg.force_wandb_name:
+    if hasattr(cfg, "force_wandb_name") and cfg.force_wandb_name:
         save_dir = cfg.save_dir.format(cfg.wandb_name)
     else:
-        cfg.wandb_name = ','.join([f"{k[0]}:{v}" for k, v in unknown_cfg.items()]) if unknown_cfg else cfg.wandb_name
-        save_dir = cfg.save_dir.format(cfg.latent_dims if hasattr(cfg, 'latent_dims') else cfg.wandb_name)
+        cfg.wandb_name = (
+            ",".join([f"{k[0]}:{v}" for k, v in unknown_cfg.items()])
+            if unknown_cfg
+            else cfg.wandb_name
+        )
+        save_dir = cfg.save_dir.format(
+            cfg.latent_dims if hasattr(cfg, "latent_dims") else cfg.wandb_name
+        )
 
     logger = Logger(
         project=cfg.wandb_project,
@@ -293,25 +409,34 @@ def main():
 
     print("Running Experiment:", cfg.wandb_name)
 
-
     sup_encs = {
-        cfg.sup_emb: load_encoder(cfg.sup_emb, mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') else None)
+        cfg.sup_emb: load_encoder(
+            cfg.sup_emb,
+            mixed_precision=(
+                cfg.mixed_precision if hasattr(cfg, "mixed_precision") else None
+            ),
+        )
     }
     encoder_dims = {
         cfg.sup_emb: get_sentence_embedding_dimension(sup_encs[cfg.sup_emb])
     }
     translator = load_n_translator(cfg, encoder_dims)
 
-    model_save_dir = os.path.join(save_dir, 'model.pt')
-    disc_save_dir = os.path.join(save_dir, 'disc.pt')
+    model_save_dir = os.path.join(save_dir, "model.pt")
+    disc_save_dir = os.path.join(save_dir, "disc.pt")
 
     os.makedirs(save_dir, exist_ok=True)
 
-    assert hasattr(cfg, 'unsup_emb')
+    assert hasattr(cfg, "unsup_emb")
     assert cfg.sup_emb != cfg.unsup_emb
 
     unsup_enc = {
-        cfg.unsup_emb: load_encoder(cfg.unsup_emb, mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') else None)
+        cfg.unsup_emb: load_encoder(
+            cfg.unsup_emb,
+            mixed_precision=(
+                cfg.mixed_precision if hasattr(cfg, "mixed_precision") else None
+            ),
+        )
     }
     unsup_dim = {
         cfg.unsup_emb: get_sentence_embedding_dimension(unsup_enc[cfg.unsup_emb])
@@ -324,7 +449,10 @@ def main():
 
     cfg.num_params = sum(x.numel() for x in translator.parameters())
     print("Number of parameters:", cfg.num_params)
-    print("Number of *trainable* parameters:", sum(p.numel() for p in translator.parameters() if p.requires_grad))
+    print(
+        "Number of *trainable* parameters:",
+        sum(p.numel() for p in translator.parameters() if p.requires_grad),
+    )
     print(translator)
 
     logger = Logger(
@@ -335,33 +463,54 @@ def main():
     )
 
     num_workers = min(get_num_proc(), 8)
-    if cfg.dataset != 'mimic':
+    if cfg.dataset != "mimic":
         dset = load_streaming_embeddings(cfg.dataset)
         print(f"Using {num_workers} workers and {len(dset)} datapoints")
 
-        dset_dict = dset.train_test_split(test_size=cfg.val_size, seed=cfg.val_dataset_seed)
+        dset_dict = dset.train_test_split(
+            test_size=cfg.val_size, seed=cfg.val_dataset_seed
+        )
         dset = dset_dict["train"]
         valset = dset_dict["test"]
 
-        assert hasattr(cfg, 'num_points') or hasattr(cfg, 'unsup_points')
+        assert hasattr(cfg, "num_points") or hasattr(cfg, "unsup_points")
         dset = dset.shuffle(seed=cfg.train_dataset_seed)
-        if hasattr(cfg, 'num_points'):
+        if hasattr(cfg, "num_points"):
             assert cfg.num_points > 0 and cfg.num_points <= len(dset) // 2
             supset = dset.select(range(cfg.num_points))
             unsupset = dset.select(range(cfg.num_points, cfg.num_points * 2))
-        elif hasattr(cfg, 'unsup_points'):
+        elif hasattr(cfg, "unsup_points"):
             unsupset = dset.select(range(min(cfg.unsup_points, len(dset))))
-            supset = dset.select(range(min(cfg.unsup_points, len(dset)), len(dset) - len(unsupset)))
+            supset = dset.select(
+                range(min(cfg.unsup_points, len(dset)), len(dset) - len(unsupset))
+            )
     else:
-        supset = load_from_disk('data/mimic')['supervised'].shuffle(cfg.train_dataset_seed).select(range(cfg.num_points))
-        unsupset = load_from_disk('data/mimic')['unsupervised'].shuffle(cfg.train_dataset_seed).select(range(cfg.num_points))
-        valset = load_from_disk('data/mimic')['evaluation'].shuffle(cfg.val_dataset_seed).select(range(cfg.val_size))
+        supset = (
+            load_from_disk("data/mimic")["supervised"]
+            .shuffle(cfg.train_dataset_seed)
+            .select(range(cfg.num_points))
+        )
+        unsupset = (
+            load_from_disk("data/mimic")["unsupervised"]
+            .shuffle(cfg.train_dataset_seed)
+            .select(range(cfg.num_points))
+        )
+        valset = (
+            load_from_disk("data/mimic")["evaluation"]
+            .shuffle(cfg.val_dataset_seed)
+            .select(range(cfg.val_size))
+        )
 
         # for each, drop all columns but 'text' using remove_columns
-        supset = supset.remove_columns([col for col in supset.column_names if col != 'text'])
-        unsupset = unsupset.remove_columns([col for col in unsupset.column_names if col != 'text'])
-        valset = valset.remove_columns([col for col in valset.column_names if col != 'text'])
-        
+        supset = supset.remove_columns(
+            [col for col in supset.column_names if col != "text"]
+        )
+        unsupset = unsupset.remove_columns(
+            [col for col in unsupset.column_names if col != "text"]
+        )
+        valset = valset.remove_columns(
+            [col for col in valset.column_names if col != "text"]
+        )
 
     supset = MultiencoderTokenizedDataset(
         dataset=supset,
@@ -404,7 +553,7 @@ def main():
     if use_val_set:
         valset = MultiencoderTokenizedDataset(
             dataset=valset,
-            encoders={ **unsup_enc, **sup_encs },
+            encoders={**unsup_enc, **sup_encs},
             n_embs_per_batch=2,
             batch_size=cfg.val_bs,
             max_length=cfg.max_seq_length,
@@ -412,7 +561,7 @@ def main():
         )
         valloader = DataLoader(
             valset,
-            batch_size=cfg.val_bs if hasattr(cfg, 'val_bs') else cfg.bs,
+            batch_size=cfg.val_bs if hasattr(cfg, "val_bs") else cfg.bs,
             num_workers=num_workers,
             shuffle=False,
             pin_memory=True,
@@ -422,26 +571,32 @@ def main():
         )
         valloader = accelerator.prepare(valloader)
 
-    opt = torch.optim.Adam(translator.parameters(), lr=cfg.lr, fused=False, betas=(0.5, 0.999))
-    
+    opt = torch.optim.Adam(
+        translator.parameters(), lr=cfg.lr, fused=False, betas=(0.5, 0.999)
+    )
+
     ######################################################################################
     disc = Discriminator(
         latent_dim=translator.in_adapters[cfg.unsup_emb].in_dim,
         discriminator_dim=cfg.disc_dim,
         depth=cfg.disc_depth,
-        weight_init=cfg.weight_init
+        weight_init=cfg.weight_init,
     )
-    disc_opt = torch.optim.Adam(disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999))
+    disc_opt = torch.optim.Adam(
+        disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999)
+    )
 
     cfg.num_disc_params = sum(x.numel() for x in disc.parameters())
     print(f"Number of discriminator parameters:", cfg.num_disc_params)
     ######################################################################################
     sup_disc = Discriminator(
         latent_dim=translator.in_adapters[cfg.sup_emb].in_dim,
-        discriminator_dim=cfg.disc_dim, 
-        depth=cfg.disc_depth, 
+        discriminator_dim=cfg.disc_dim,
+        depth=cfg.disc_depth,
     )
-    sup_disc_opt = torch.optim.Adam(sup_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999))
+    sup_disc_opt = torch.optim.Adam(
+        sup_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999)
+    )
 
     cfg.num_sup_disc_params = sum(x.numel() for x in sup_disc.parameters())
     print(f"Number of supervised discriminator parameters:", cfg.num_sup_disc_params)
@@ -451,37 +606,50 @@ def main():
         latent_dim=cfg.d_adapter,
         discriminator_dim=cfg.disc_dim,
         depth=cfg.disc_depth,
-        weight_init=cfg.weight_init
+        weight_init=cfg.weight_init,
     )
-    latent_disc_opt = torch.optim.RMSprop(latent_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps)
+    latent_disc_opt = torch.optim.RMSprop(
+        latent_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps
+    )
     cfg.num_latent_disc_params = sum(x.numel() for x in latent_disc.parameters())
     print(f"Number of latent discriminator parameters:", cfg.num_latent_disc_params)
     print(latent_disc)
-    latent_disc_opt = torch.optim.Adam(latent_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999))
+    latent_disc_opt = torch.optim.Adam(
+        latent_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999)
+    )
     ######################################################################################
     similarity_disc = Discriminator(
         latent_dim=cfg.bs,
         discriminator_dim=cfg.disc_dim,
         depth=cfg.disc_depth,
-        weight_init=cfg.weight_init
+        weight_init=cfg.weight_init,
     )
-    similarity_disc_opt = torch.optim.RMSprop(similarity_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps)
-    cfg.num_similarity_disc_params = sum(x.numel() for x in similarity_disc.parameters())
-    print(f"Number of similarity discriminator parameters:", cfg.num_similarity_disc_params)
+    similarity_disc_opt = torch.optim.RMSprop(
+        similarity_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps
+    )
+    cfg.num_similarity_disc_params = sum(
+        x.numel() for x in similarity_disc.parameters()
+    )
+    print(
+        f"Number of similarity discriminator parameters:",
+        cfg.num_similarity_disc_params,
+    )
     print(similarity_disc)
-    similarity_disc_opt = torch.optim.Adam(similarity_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999))
+    similarity_disc_opt = torch.optim.Adam(
+        similarity_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999)
+    )
     ######################################################################################
 
     max_num_epochs = int(np.ceil(cfg.epochs))
     steps_per_epoch = len(supset) // cfg.bs
     total_steps = steps_per_epoch * cfg.epochs / cfg.gradient_accumulation_steps
-    warmup_length = (cfg.warmup_length if hasattr(cfg, 'warmup_length') else 100)
+    warmup_length = cfg.warmup_length if hasattr(cfg, "warmup_length") else 100
 
     def lr_lambda(step):
         if step < warmup_length:
             return min(1, step / warmup_length)
         else:
-            if hasattr(cfg, 'no_scheduler') and cfg.no_scheduler:
+            if hasattr(cfg, "no_scheduler") and cfg.no_scheduler:
                 return 1
             return 1 - (step - warmup_length) / max(1, total_steps - warmup_length)
 
@@ -492,20 +660,29 @@ def main():
     similarity_disc_scheduler = LambdaLR(similarity_disc_opt, lr_lambda=lr_lambda)
 
     if cfg.finetune_mode:
-        assert hasattr(cfg, 'load_dir')
+        assert hasattr(cfg, "load_dir")
         print(f"Loading models from {cfg.load_dir}...")
-        translator.load_state_dict(torch.load(cfg.load_dir + 'model.pt', map_location='cpu'), strict=False)
-        disc.load_state_dict(torch.load(cfg.load_dir + 'disc.pt', map_location='cpu'))
+        translator.load_state_dict(
+            torch.load(cfg.load_dir + "model.pt", map_location="cpu"), strict=False
+        )
+        disc.load_state_dict(torch.load(cfg.load_dir + "disc.pt", map_location="cpu"))
 
     translator, opt, scheduler = accelerator.prepare(translator, opt, scheduler)
     disc, disc_opt, disc_scheduler = accelerator.prepare(disc, disc_opt, disc_scheduler)
-    sup_disc, sup_disc_opt, sup_disc_scheduler = accelerator.prepare(sup_disc, sup_disc_opt, sup_disc_scheduler)
-    latent_disc, latent_disc_opt, latent_disc_scheduler = accelerator.prepare(latent_disc, latent_disc_opt, latent_disc_scheduler)
-    similarity_disc, similarity_disc_opt, similarity_disc_scheduler = accelerator.prepare(
-        similarity_disc, similarity_disc_opt, similarity_disc_scheduler
+    sup_disc, sup_disc_opt, sup_disc_scheduler = accelerator.prepare(
+        sup_disc, sup_disc_opt, sup_disc_scheduler
     )
-    sup_dataloader, unsup_dataloader = accelerator.prepare(sup_dataloader, unsup_dataloader)
-
+    latent_disc, latent_disc_opt, latent_disc_scheduler = accelerator.prepare(
+        latent_disc, latent_disc_opt, latent_disc_scheduler
+    )
+    similarity_disc, similarity_disc_opt, similarity_disc_scheduler = (
+        accelerator.prepare(
+            similarity_disc, similarity_disc_opt, similarity_disc_scheduler
+        )
+    )
+    sup_dataloader, unsup_dataloader = accelerator.prepare(
+        sup_dataloader, unsup_dataloader
+    )
 
     if cfg.gan_style == "vanilla":
         gan_cls = VanillaGAN
@@ -521,7 +698,7 @@ def main():
         gan_cls = WassersteinGAN_GP
     else:
         raise ValueError(f"Unknown GAN style: {cfg.gan_style}")
-        
+
     latent_gan = gan_cls(
         cfg=cfg,
         generator=translator,
@@ -552,15 +729,21 @@ def main():
         discriminator=sup_disc,
         discriminator_opt=sup_disc_opt,
         discriminator_scheduler=sup_disc_scheduler,
-        accelerator=accelerator
+        accelerator=accelerator,
     )
 
     sup_iter = None
-    if hasattr(cfg, 'unsup_points'):
+    if hasattr(cfg, "unsup_points"):
         sup_iter = iter(sup_dataloader)
 
-    if hasattr(cfg, 'val_size') and hasattr(cfg, 'patience') and hasattr(cfg, 'min_delta'):
-        early_stopper = EarlyStopper(patience=cfg.patience, min_delta=cfg.min_delta, increase=False)
+    if (
+        hasattr(cfg, "val_size")
+        and hasattr(cfg, "patience")
+        and hasattr(cfg, "min_delta")
+    ):
+        early_stopper = EarlyStopper(
+            patience=cfg.patience, min_delta=cfg.min_delta, increase=False
+        )
         early_stopping = True
     else:
         early_stopping = False
@@ -570,10 +753,16 @@ def main():
             with torch.no_grad(), accelerator.autocast():
                 translator.eval()
                 val_res = {}
-                recons, trans, heatmap_dict, _, _, _ = eval_loop_(cfg, translator, {**sup_encs, **unsup_enc}, valloader, device=accelerator.device)
+                recons, trans, heatmap_dict, _, _, _ = eval_loop_(
+                    cfg,
+                    translator,
+                    {**sup_encs, **unsup_enc},
+                    valloader,
+                    device=accelerator.device,
+                )
                 for flag, res in recons.items():
                     for k, v in res.items():
-                        if k == 'cos':
+                        if k == "cos":
                             val_res[f"val/rec_{flag}_{k}"] = v
                 for target_flag, d in trans.items():
                     for flag, res in d.items():
@@ -583,8 +772,8 @@ def main():
                             val_res[f"val/{flag}_{target_flag}_{k}"] = v
 
                 if len(heatmap_dict) > 0:
-                    for k,v in heatmap_dict.items():
-                        if "heatmap" in k and 'top' not in k:
+                    for k, v in heatmap_dict.items():
+                        if "heatmap" in k and "top" not in k:
                             v = wandb.Image(v)
                             val_res[f"val/{k}"] = v
                         else:
@@ -593,17 +782,32 @@ def main():
                 translator.train()
 
             if epoch >= cfg.min_epochs and early_stopping:
-                score = np.mean([v for k, v in val_res.items() if 'top_rank' in k])
+                score = np.mean([v for k, v in val_res.items() if "top_rank" in k])
 
                 if early_stopper.early_stop(score):
                     print("Early stopping...")
                     break
                 if early_stopper.counter == 0 and score < early_stopper.opt_val:
-                    print(f"Saving model (counter = {early_stopper.counter})... {score} < {early_stopper.opt_val} is the best score so far...")
-                    save_everything(cfg, translator, opt, [gan, sup_gan, latent_gan, similarity_gan], save_dir)
+                    print(
+                        f"Saving model (counter = {early_stopper.counter})... {score} < {early_stopper.opt_val} is the best score so far..."
+                    )
+                    save_everything(
+                        cfg,
+                        translator,
+                        opt,
+                        [gan, sup_gan, latent_gan, similarity_gan],
+                        save_dir,
+                    )
 
         max_num_batches = None
-        print(f"Epoch", epoch, "max_num_batches", max_num_batches, "max_num_epochs", max_num_epochs)
+        print(
+            f"Epoch",
+            epoch,
+            "max_num_batches",
+            max_num_batches,
+            "max_num_epochs",
+            max_num_epochs,
+        )
         if epoch + 1 >= max_num_epochs:
             max_num_batches = max(1, (cfg.epochs - epoch) * len(supset) // cfg.bs)
             print(f"Setting max_num_batches to {max_num_batches}")
@@ -625,10 +829,10 @@ def main():
             opt=opt,
             scheduler=scheduler,
             logger=logger,
-            max_num_batches=max_num_batches
+            max_num_batches=max_num_batches,
         )
 
-    with open(save_dir + 'config.toml', 'w') as f:
+    with open(save_dir + "config.toml", "w") as f:
         toml.dump(cfg.__dict__, f)
 
 
