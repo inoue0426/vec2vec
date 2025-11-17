@@ -24,6 +24,8 @@ data/
 viz/
 latex/
 
+.wandb/
+**/.ipynb_checkpoints/
 code_ae_data/
 dataset/
 dataset.zip
