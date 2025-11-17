@@ -190,7 +190,7 @@ def process_batch(batch, encoders, normalize_embeddings, device="cpu"):
 
         with torch.no_grad():
             mu, logvar = model.encode(
-                batch["x_gene"].to(device), batch["x_drug"].to(device)
+                batch[0].to(device)
             )
 
             if normalize_embeddings:
