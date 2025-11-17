@@ -97,11 +97,6 @@ def training_loop_(
             print(f"Early stopping at {i} batches")
             break
         with accelerator.accumulate(translator), accelerator.autocast():
-            required = {"x_gene", "x_drug"}
-            assert (
-                set(sup_batch.keys()) == required
-                and set(unsup_batch.keys()) == required
-            )
             ins = {
                 **process_batch(sup_batch, sup_encs, cfg.normalize_embeddings, device),
                 **process_batch(
