@@ -2,25 +2,20 @@ import os
 
 import datasets
 import torch
-import torch.nn.functional as F
-import numpy as np
-from torch.utils.data import DataLoader, TensorDataset
 import vec2text
 
 from datasets import Features, Value, load_dataset
 from beir.datasets.data_loader_hf import HFDataLoader
+from torch.nn import functional as F
 
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 
+
 def _prepare_retrieval_dataset(d: datasets.Dataset) -> datasets.Dataset:
-    q_ds = d.remove_columns(
-        [c for c in d.column_names if c not in {"query", "dataset"}]
-    ).rename_column("query", "text")
-    d_ds = d.remove_columns(
-        [c for c in d.column_names if c not in {"document", "dataset"}]
-    ).rename_column("document", "text")
+    q_ds = d.remove_columns([c for c in d.column_names if c not in {'query', 'dataset'}]).rename_column('query', 'text')
+    d_ds = d.remove_columns([c for c in d.column_names if c not in {'document', 'dataset'}]).rename_column('document', 'text')
     return datasets.concatenate_datasets([q_ds, d_ds])
 
 
@@ -41,91 +36,48 @@ def _load_retrieval_dataset() -> datasets.Dataset:
 
 
 def load_streaming_embeddings(
-    dataset_name: str,
-    split_flag: str = "train",
-    streaming: bool = False,
-):
-    if dataset_name == "nq":
+        dataset_name: str,
+        split_flag: str = "train",
+        streaming: bool = False,
+    ):
+    if dataset_name == 'nq':
         dset = load_dataset("jxm/nq_corpus_dpr", split=split_flag, streaming=streaming)
-    elif dataset_name == "fineweb":
-        dset = load_dataset(
-            "HuggingFaceFW/fineweb",
-            streaming=streaming,
-            num_proc=8,
-            keep_in_memory=False,
-        )["train"]
-    elif dataset_name == "fineweb-medium":
-        dset = load_dataset(
-            "HuggingFaceFW/fineweb",
-            "sample-350BT",
-            streaming=streaming,
-            num_proc=8,
-            keep_in_memory=False,
-        )["train"]
+    elif dataset_name == 'fineweb':
+        dset = load_dataset("HuggingFaceFW/fineweb", streaming=streaming, num_proc=8, keep_in_memory=False)["train"]
+    elif dataset_name == 'fineweb-medium':
+        dset = load_dataset("HuggingFaceFW/fineweb", "sample-350BT", streaming=streaming, num_proc=8, keep_in_memory=False)["train"]
     elif dataset_name == "fineweb-tiny":
-        dset = load_dataset(
-            "HuggingFaceFW/fineweb", "sample-10BT", streaming=streaming, num_proc=8
-        )["train"]
+        dset = load_dataset("HuggingFaceFW/fineweb", "sample-10BT", streaming=streaming, num_proc=8)["train"]
     elif dataset_name == "nq-corpus":
-        dset = load_dataset("BeIR/nq", "corpus", streaming=streaming, num_proc=8)[
-            "corpus"
-        ]
+        dset = load_dataset("BeIR/nq", "corpus", streaming=streaming, num_proc=8)["corpus"]
     elif dataset_name == "arguana-corpus":
-        dset = load_dataset("BeIR/arguana", "corpus", streaming=streaming, num_proc=8)[
-            "corpus"
-        ]
+        dset = load_dataset("BeIR/arguana", "corpus", streaming=streaming, num_proc=8)["corpus"]
     elif dataset_name == "arguana-queries":
-        dset = load_dataset("BeIR/arguana", "queries", streaming=streaming, num_proc=8)[
-            "queries"
-        ]
+        dset = load_dataset("BeIR/arguana", "queries", streaming=streaming, num_proc=8)["queries"]
     elif dataset_name == "fiqa-corpus":
-        dset = load_dataset("BeIR/fiqa", "corpus", streaming=streaming, num_proc=8)[
-            "corpus"
-        ]
+        dset = load_dataset("BeIR/fiqa", "corpus", streaming=streaming, num_proc=8)["corpus"]
     elif dataset_name == "fiqa-queries":
-        dset = load_dataset("BeIR/fiqa", "queries", streaming=streaming, num_proc=8)[
-            "queries"
-        ]
+        dset = load_dataset("BeIR/fiqa", "queries", streaming=streaming, num_proc=8)["queries"]
     elif dataset_name == "quora-corpus":
-        dset = load_dataset("BeIR/quora", "corpus", streaming=streaming, num_proc=8)[
-            "corpus"
-        ]
+        dset = load_dataset("BeIR/quora", "corpus", streaming=streaming, num_proc=8)["corpus"]
     elif dataset_name == "quora-queries":
-        dset = load_dataset("BeIR/quora", "queries", streaming=streaming, num_proc=8)[
-            "queries"
-        ]
+        dset = load_dataset("BeIR/quora", "queries", streaming=streaming, num_proc=8)["queries"]
     elif dataset_name == "trec-covid-corpus":
-        dset = load_dataset(
-            "BeIR/trec-covid", "corpus", streaming=streaming, num_proc=8
-        )["corpus"]
+        dset = load_dataset("BeIR/trec-covid", "corpus", streaming=streaming, num_proc=8)["corpus"]
     elif dataset_name == "trec-covid-queries":
-        dset = load_dataset(
-            "BeIR/trec-covid", "queries", streaming=streaming, num_proc=8
-        )["queries"]
+        dset = load_dataset("BeIR/trec-covid", "queries", streaming=streaming, num_proc=8)["queries"]
     elif dataset_name == "fever-corpus":
-        dset = load_dataset("BeIR/fever", "corpus", streaming=streaming, num_proc=8)[
-            "corpus"
-        ]
+        dset = load_dataset("BeIR/fever", "corpus", streaming=streaming, num_proc=8)["corpus"]
     elif dataset_name == "fever-queries":
-        dset = load_dataset("BeIR/fever", "queries", streaming=streaming, num_proc=8)[
-            "queries"
-        ]
+        dset = load_dataset("BeIR/fever", "queries", streaming=streaming, num_proc=8)["queries"]
     elif dataset_name == "scifact-corpus":
-        dset = load_dataset("BeIR/scifact", "corpus", streaming=streaming, num_proc=8)[
-            "corpus"
-        ]
+        dset = load_dataset("BeIR/scifact", "corpus", streaming=streaming, num_proc=8)["corpus"]
     elif dataset_name == "scifact-queries":
-        dset = load_dataset("BeIR/scifact", "queries", streaming=streaming, num_proc=8)[
-            "queries"
-        ]
+        dset = load_dataset("BeIR/scifact", "queries", streaming=streaming, num_proc=8)["queries"]
     elif dataset_name == "msmarco-corpus":
-        dset = load_dataset("BeIR/msmarco", "corpus", streaming=streaming, num_proc=8)[
-            "corpus"
-        ]
+        dset = load_dataset("BeIR/msmarco", "corpus", streaming=streaming, num_proc=8)["corpus"]
     elif dataset_name == "msmarco-queries":
-        dset = load_dataset("BeIR/msmarco", "queries", streaming=streaming, num_proc=8)[
-            "queries"
-        ]
+        dset = load_dataset("BeIR/msmarco", "queries", streaming=streaming, num_proc=8)["queries"]
     elif dataset_name == "retrieval":
         dset = _load_retrieval_dataset()
     else:
@@ -134,39 +86,38 @@ def load_streaming_embeddings(
     return dset.with_format("torch")
 
 
-def get_embeddings(text_list, encoder, tokenizer, max_length, device):
+def get_embeddings(text_list,
+                   encoder,
+                   tokenizer,
+                   max_length,
+                   device):
 
-    inputs = tokenizer(
-        text_list,
-        return_tensors="pt",
-        max_length=max_length,
-        truncation=True,
-        padding="max_length",
-    ).to(device)
+    inputs = tokenizer(text_list,
+                       return_tensors="pt",
+                       max_length=max_length,
+                       truncation=True,
+                       padding="max_length").to(device)
 
     with torch.no_grad():
         model_output = encoder(**inputs)
         hidden_state = model_output.last_hidden_state
-        embeddings = vec2text.models.model_utils.mean_pool(
-            hidden_state, inputs["attention_mask"]
-        )
+        embeddings = vec2text.models.model_utils.mean_pool(hidden_state, inputs['attention_mask'])
 
     return embeddings
 
+def embed(x, encoder, tokenizer, max_length=32, device='cpu'):
+    embeddings = get_embeddings(x['text'], encoder, tokenizer, max_length, device)
+    return {
+        'text': x['text'],
+        'text_embeddings': embeddings
+    }
 
-def embed(x, encoder, tokenizer, max_length=32, device="cpu"):
-    embeddings = get_embeddings(x["text"], encoder, tokenizer, max_length, device)
-    return {"text": x["text"], "text_embeddings": embeddings}
-
-
-def forward_embedding_sentence_transformers(
-    enc, features, normalize_embeddings: bool = True, mixed_precision: str = None
-):
-    output_value = "sentence_embedding"
+def forward_embedding_sentence_transformers(enc, features, normalize_embeddings: bool = True, mixed_precision: str = None):
+    output_value  = "sentence_embedding"
     if mixed_precision is not None:
-        if mixed_precision == "bf16":
+        if mixed_precision == 'bf16':
             enc_type = torch.bfloat16
-        elif mixed_precision == "fp16":
+        elif mixed_precision == 'fp16':
             enc_type = torch.float16
         else:
             raise ValueError(f"Unknown mixed precision flag {mixed_precision}")
@@ -199,10 +150,12 @@ def process_batch(batch, encoders, normalize_embeddings, device="cpu"):
             ins[emb] = mu
     return ins
 
-
 class NanoBeirHFDataLoaderOverride(HFDataLoader):
     def _load_qrels(self, split):
-        qrels_ds = load_dataset(self.hf_repo, "qrels")["train"]
+        qrels_ds = load_dataset(
+            self.hf_repo,
+            "qrels"
+        )["train"]
         qrels_ds = qrels_ds.add_column("score", [1] * len(qrels_ds))
         features = Features(
             {
@@ -216,12 +169,16 @@ class NanoBeirHFDataLoaderOverride(HFDataLoader):
 
 
 def load_beir_style_dataset(dataset: str):
-    if "nano" in dataset.lower():
+    if 'nano' in dataset.lower():
         corpus, queries, qrels = NanoBeirHFDataLoaderOverride(
-            hf_repo=f"zeta-alpha-ai/{dataset}", streaming=False, keep_in_memory=True
+            hf_repo=f"zeta-alpha-ai/{dataset}",
+            streaming=False,
+            keep_in_memory=True
         ).load()
     else:
         corpus, queries, qrels = HFDataLoader(
-            hf_repo=f"BeIR/{dataset.lower()}", streaming=False, keep_in_memory=False
+            hf_repo=f"BeIR/{dataset.lower()}",
+            streaming=False,
+            keep_in_memory=False
         ).load(split="test")
     return corpus, queries, qrels
