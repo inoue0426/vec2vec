@@ -7,6 +7,7 @@ import vec2text
 from datasets import Features, Value, load_dataset
 from beir.datasets.data_loader_hf import HFDataLoader
 from torch.nn import functional as F
+import pandas as pd
 
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
@@ -132,23 +133,18 @@ def forward_embedding_sentence_transformers(enc, features, normalize_embeddings:
 
     return embeddings.to(torch.float32)
 
-
 def process_batch(batch, encoders, normalize_embeddings, device="cpu"):
+    x = batch[0].to(device)   # (B, G)
+
     ins = {}
-
-    for emb in encoders.keys():
-        model = encoders[emb].to(device)
-
-        with torch.no_grad():
-            mu, logvar = model.encode(
-                batch[0].to(device)
-            )
-
-            if normalize_embeddings:
-                mu = F.normalize(mu, p=2, dim=1)
-
-            ins[emb] = mu
+    for name, encoder in encoders.items():
+        encoder = encoder.to(device)
+        z = encoder.encode(x)    # ← Tensor のまま渡すだけ
+        ins[name] = z.to(device)
     return ins
+
+
+
 
 class NanoBeirHFDataLoaderOverride(HFDataLoader):
     def _load_qrels(self, split):
