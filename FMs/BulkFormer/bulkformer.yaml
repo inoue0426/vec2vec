@@ -1,0 +1,44 @@
+name: bulkformer
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+  - numpy>=2.0
+  - scipy
+  - pandas
+  - scikit-learn
+  - h5py
+  - numba
+  - matplotlib
+  - seaborn
+  - ipykernel
+  - statsmodels
+  - pyyaml
+  - requests
+  - tqdm
+  - networkx
+  - natsort
+  - rdkit=2024.09.5
+
+  - pip:
+      # まずは上位だけ。下位(PYG 拡張)は後で手動インストール
+      - torch==2.5.1
+      - torchvision==0.20.1
+      - torchaudio==2.5.1
+      - torch-geometric==2.6.1
+
+      - transformers==4.48.3
+      - tokenizers==0.21.0
+      - datasets==3.3.2
+      - safetensors==0.5.2
+      - huggingface-hub==0.28.1
+      - scanpy==1.10.4
+      - anndata==0.11.1
+      - umap-learn==0.5.7
+      - pynndescent==0.5.13
+      - einops==0.8.0
+      - performer-pytorch==1.1.4
+      - axial-positional-embedding==0.2.1
