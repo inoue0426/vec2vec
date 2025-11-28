@@ -24,6 +24,9 @@ data/
 viz/
 latex/
 
+!FMs/BulkFormer/data/
+!FMs/BulkFormer/data/**
+
 .wandb/
 **/.ipynb_checkpoints/
 code_ae_data/
