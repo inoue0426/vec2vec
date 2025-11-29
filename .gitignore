@@ -1,4 +1,6 @@
 __pycache__/
+FMs/BulkFormer/data/esm2_feature_concat.pt
+FMs/BulkFormer/model/Bulkformer_ckpt_epoch_29.pt
 tmp_trainer
 legacy
 *.pyc
@@ -25,7 +27,6 @@ viz/
 latex/
 
 !FMs/BulkFormer/data/
-!FMs/BulkFormer/data/**
 
 .wandb/
 **/.ipynb_checkpoints/

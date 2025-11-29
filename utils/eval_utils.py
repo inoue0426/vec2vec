@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from utils.tokenization import get_tokenizer_max_length
-
+from tqdm import tqdm
 
 def text_to_embedding(
     text,
@@ -106,36 +106,50 @@ def calculate_scores(score_flag, target_text, translation_text):
     return np.mean([score_func(p, r) for p, r in zip(target_text, translation_text)])
 
 
+# # Original
+# def eval_batch(ins, recons, translations):
+#     recon_res = {}
+#     translation_res = {}
+#     for target_flag, emb in ins.items():
+#         emb = emb / emb.norm(dim=1, keepdim=True)
+#         in_distances = 1 - (emb @ emb.T)
+#         rec = recons[target_flag]
+#         rec = rec / rec.norm(dim=1, keepdim=True)
+#         rec_distances = 1 - (rec @ rec.T)
+#         recon_res[target_flag] = {
+#             "mse": F.mse_loss(emb, rec).item(),
+#             "cos": F.cosine_similarity(emb, rec).mean().item(),
+#             "std": rec.std(dim=0).mean().item(),
+#             "vsp": (in_distances - rec_distances).abs().mean().item(),
+#             "cos_var": F.cosine_similarity(emb, rec).var().item(),
+#             "vsp_var": (in_distances - rec_distances).abs().var().item(),
+#         }
+#         translation_res[target_flag] = {}
+#         for flag, trans in translations[target_flag].items():
+#             trans = trans / trans.norm(dim=1, keepdim=True)
+#             out_distances = 1 - (trans @ trans.T)
+#             translation_res[target_flag][flag] = {
+#                 "mse": F.mse_loss(emb, trans).item(),
+#                 "cos": F.cosine_similarity(emb, trans).mean().item(),
+#                 "std": trans.std(dim=0).mean().item(),
+#                 "vsp": (in_distances - out_distances).abs().mean().item(),
+#                 "cos_var": F.cosine_similarity(emb, trans).var().item(),
+#                 "vsp_var": (in_distances - out_distances).abs().var().item(),
+#             }
+#     return recon_res, translation_res
+
 def eval_batch(ins, recons, translations):
-    recon_res = {}
-    translation_res = {}
-    for target_flag, emb in ins.items():
-        emb = emb / emb.norm(dim=1, keepdim=True)
-        in_distances = 1 - (emb @ emb.T)
-        rec = recons[target_flag]
-        rec = rec / rec.norm(dim=1, keepdim=True)
-        rec_distances = 1 - (rec @ rec.T)
-        recon_res[target_flag] = {
-            "mse": F.mse_loss(emb, rec).item(),
-            "cos": F.cosine_similarity(emb, rec).mean().item(),
-            "std": rec.std(dim=0).mean().item(),
-            "vsp": (in_distances - rec_distances).abs().mean().item(),
-            "cos_var": F.cosine_similarity(emb, rec).var().item(),
-            "vsp_var": (in_distances - rec_distances).abs().var().item(),
-        }
-        translation_res[target_flag] = {}
-        for flag, trans in translations[target_flag].items():
-            trans = trans / trans.norm(dim=1, keepdim=True)
-            out_distances = 1 - (trans @ trans.T)
-            translation_res[target_flag][flag] = {
-                "mse": F.mse_loss(emb, trans).item(),
-                "cos": F.cosine_similarity(emb, trans).mean().item(),
-                "std": trans.std(dim=0).mean().item(),
-                "vsp": (in_distances - out_distances).abs().mean().item(),
-                "cos_var": F.cosine_similarity(emb, trans).var().item(),
-                "vsp_var": (in_distances - out_distances).abs().var().item(),
-            }
-    return recon_res, translation_res
+    """
+    Dummy eval_batch.
+
+    For this experiment we do not use the generic reconstruction/translation
+    metrics here. Validation metrics are computed directly in eval_loop_
+    using TCGA -> cellline translations.
+    """
+    return {}, {}
+
+
+
 
 
 def text_batch(
@@ -404,6 +418,25 @@ def eval_loop_(
     device="cpu",
     labels=None,
 ):
+    """
+    Validation loop specialized for the bio setting where:
+      - we only have TCGA expression data on validation,
+      - but we still want to monitor the quality of the mapping
+        TCGA (tcga_exp) -> cellline (cellline_exp).
+
+    Metrics (per epoch; averaged over val batches):
+      - tcga_exp_cellline_exp_cos
+      - tcga_exp_cellline_exp_mse
+      - tcga_exp_cellline_exp_rmse
+      - tcga_exp_cellline_exp_vsp
+
+    These are computed by:
+      z_tcga       = encoder_tcga(x)
+      z_cell_fake  = translator.translate_embeddings(z_tcga, "tcga_exp", "cellline_exp")
+      cos(z_tcga, z_cell_fake), mse(z_tcga, z_cell_fake), etc.
+    """
+
+    # We only care about translation_res; other dicts are kept for API compatibility.
     recon_res = {}
     translation_res = {}
     heatmap_res = {}
@@ -411,75 +444,65 @@ def eval_loop_(
     text_translation_res = {}
     classification_res = {}
 
-    top_k_batches = cfg.top_k_batches if hasattr(cfg, "top_k_batches") else 0
-    text_batches = cfg.text_batches if hasattr(cfg, "text_batches") else 0
-    with torch.no_grad():
-        for i, batch in enumerate(data_iter):
-            ins = process_batch(batch, encoders, cfg.normalize_embeddings, device)
-            recons, translations = translator(ins, include_reps=False)
+    src_flag = cfg.unsup_emb   # e.g. "tcga_exp"
+    tgt_flag = cfg.sup_emb     # e.g. "cellline_exp"
 
-            r_res, t_res = eval_batch(ins, recons, translations)
-            merge_dicts(recon_res, r_res)
-            merge_dicts(translation_res, t_res)
-            if (
-                i < top_k_batches
-                and hasattr(cfg, "top_k_size")
-                and hasattr(cfg, "k")
-                and cfg.top_k_size > 0
-            ):
-                heatmap_size = cfg.heatmap_size if i == top_k_batches - 1 else None
-                batch_res = create_heatmap(
-                    translator,
-                    ins,
-                    cfg.sup_emb,
-                    cfg.unsup_emb,
-                    cfg.top_k_size,
-                    heatmap_size,
-                    cfg.k,
-                )
-                batch_res.update(
-                    create_heatmap(
-                        translator,
-                        ins,
-                        cfg.unsup_emb,
-                        cfg.sup_emb,
-                        cfg.top_k_size,
-                        heatmap_size,
-                        cfg.k,
-                    )
-                )
-                merge_dicts(heatmap_res, batch_res)
-            if (
-                i < text_batches
-                and inverters is not None
-                and (cfg.sup_emb in inverters or cfg.unsup_emb in inverters)
-            ):
-                t_r_res, t_t_res = text_batch(
-                    ins,
-                    recons,
-                    translations,
-                    inverters,
-                    encoders,
-                    cfg.normalize_embeddings,
-                    cfg.max_seq_length,
-                    device,
-                )
-                merge_dicts(text_recon_res, t_r_res)
-                merge_dicts(text_translation_res, t_t_res)
-            if labels is not None:
-                c_res = classification_batch(
-                    ins, translations, labels, batch["label"], k=cfg.k
-                )
-                merge_dicts(classification_res, c_res)
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(data_iter)):
+            # Encode validation batch (TCGA only)
+            ins = process_batch(batch, encoders, cfg.normalize_embeddings, device)
+
+            if src_flag not in ins:
+                # Nothing to do if the source embedding is not present
+                if pbar is not None:
+                    pbar.update(1)
+                continue
+
+            z_src = ins[src_flag]  # (B, D)
+            z_src = F.normalize(z_src, p=2, dim=1)
+
+            # Translate TCGA embeddings into the cellline embedding space
+            z_tgt_fake = translator.translate_embeddings(z_src, src_flag, tgt_flag)
+            z_tgt_fake = F.normalize(z_tgt_fake, p=2, dim=1)
+
+            # --- batch-wise metrics ---
+
+            # Cosine similarity
+            cos = F.cosine_similarity(z_src, z_tgt_fake).mean().item()
+
+            # MSE / RMSE
+            mse = F.mse_loss(z_src, z_tgt_fake).item()
+            rmse = mse ** 0.5
+
+            # Vector space preservation (pairwise distance preservation)
+            in_distances = 1 - (z_src @ z_src.T)
+            out_distances = 1 - (z_tgt_fake @ z_tgt_fake.T)
+            vsp = (in_distances - out_distances).abs().mean().item()
+
+            # Accumulate in the same nested-dict style as original eval code
+            if src_flag not in translation_res:
+                translation_res[src_flag] = {}
+            if tgt_flag not in translation_res[src_flag]:
+                translation_res[src_flag][tgt_flag] = {
+                    "cos": [],
+                    "mse": [],
+                    "rmse": [],
+                    "vsp": [],
+                }
+
+            translation_res[src_flag][tgt_flag]["cos"].append(cos)
+            translation_res[src_flag][tgt_flag]["mse"].append(mse)
+            translation_res[src_flag][tgt_flag]["rmse"].append(rmse)
+            translation_res[src_flag][tgt_flag]["vsp"].append(vsp)
+
             if pbar is not None:
                 pbar.update(1)
 
-        recon_res = mean_dicts(recon_res, ses=True, bs=cfg.val_bs)
-        translation_res = mean_dicts(translation_res, ses=True, bs=cfg.val_bs)
-        heatmap_res = mean_dicts(heatmap_res, ses=True, bs=cfg.val_bs)
-        text_recon_res = mean_dicts(text_recon_res)
-        text_translation_res = mean_dicts(text_translation_res)
-        classification_res = mean_dicts(classification_res, ses=True, bs=cfg.val_bs)
+        # Reduce over batches: turn lists into means
+        translation_res = mean_dicts(translation_res, ses=False, bs=cfg.val_bs)
+
+        # Return structure is kept the same shape as before, but only
+        # translation_res contains meaningful values.
         return (
             recon_res,
             translation_res,
@@ -488,6 +511,104 @@ def eval_loop_(
             text_translation_res,
             classification_res,
         )
+
+
+
+
+# def eval_loop_(
+#     cfg,
+#     translator,
+#     encoders,
+#     data_iter,
+#     inverters=None,
+#     pbar=None,
+#     device="cpu",
+#     labels=None,
+# ):
+#     recon_res = {}
+#     translation_res = {}
+#     heatmap_res = {}
+#     text_recon_res = {}
+#     text_translation_res = {}
+#     classification_res = {}
+
+#     top_k_batches = cfg.top_k_batches if hasattr(cfg, "top_k_batches") else 0
+#     text_batches = cfg.text_batches if hasattr(cfg, "text_batches") else 0
+#     with torch.no_grad():
+#         for i, batch in enumerate(data_iter):
+#             ins = process_batch(batch, encoders, cfg.normalize_embeddings, device)
+#             recons, translations = translator(ins, include_reps=False)
+
+#             r_res, t_res = eval_batch(ins, recons, translations)
+#             merge_dicts(recon_res, r_res)
+#             merge_dicts(translation_res, t_res)
+#             if (
+#                 i < top_k_batches
+#                 and hasattr(cfg, "top_k_size")
+#                 and hasattr(cfg, "k")
+#                 and cfg.top_k_size > 0
+#             ):
+#                 heatmap_size = cfg.heatmap_size if i == top_k_batches - 1 else None
+#                 batch_res = create_heatmap(
+#                     translator,
+#                     ins,
+#                     cfg.sup_emb,
+#                     cfg.unsup_emb,
+#                     cfg.top_k_size,
+#                     heatmap_size,
+#                     cfg.k,
+#                 )
+#                 batch_res.update(
+#                     create_heatmap(
+#                         translator,
+#                         ins,
+#                         cfg.unsup_emb,
+#                         cfg.sup_emb,
+#                         cfg.top_k_size,
+#                         heatmap_size,
+#                         cfg.k,
+#                     )
+#                 )
+#                 merge_dicts(heatmap_res, batch_res)
+#             if (
+#                 i < text_batches
+#                 and inverters is not None
+#                 and (cfg.sup_emb in inverters or cfg.unsup_emb in inverters)
+#             ):
+#                 t_r_res, t_t_res = text_batch(
+#                     ins,
+#                     recons,
+#                     translations,
+#                     inverters,
+#                     encoders,
+#                     cfg.normalize_embeddings,
+#                     cfg.max_seq_length,
+#                     device,
+#                 )
+#                 merge_dicts(text_recon_res, t_r_res)
+#                 merge_dicts(text_translation_res, t_t_res)
+#             if labels is not None:
+#                 c_res = classification_batch(
+#                     ins, translations, labels, batch["label"], k=cfg.k
+#                 )
+#                 merge_dicts(classification_res, c_res)
+#             if pbar is not None:
+#                 pbar.update(1)
+
+#         recon_res = mean_dicts(recon_res, ses=True, bs=cfg.val_bs)
+#         translation_res = mean_dicts(translation_res, ses=True, bs=cfg.val_bs)
+#         heatmap_res = mean_dicts(heatmap_res, ses=True, bs=cfg.val_bs)
+#         text_recon_res = mean_dicts(text_recon_res)
+#         text_translation_res = mean_dicts(text_translation_res)
+#         classification_res = mean_dicts(classification_res, ses=True, bs=cfg.val_bs)
+#         return (
+#             recon_res,
+#             translation_res,
+#             heatmap_res,
+#             text_recon_res,
+#             text_translation_res,
+#             classification_res,
+#         )
 
 
 class EarlyStopper:

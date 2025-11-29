@@ -12,26 +12,58 @@ from utils.BulkFormer import BulkFormer
 from model.config import model_params
 from tqdm import tqdm
 
+import urllib.request  # ← 追加
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CKPT_URL = (
+    "https://zenodo.org/records/15559368/files/"
+    "Bulkformer_ckpt_epoch_29.pt?download=1"
+)
+
+ESM2_URL = (
+    "https://zenodo.org/records/15559368/files/"
+    "esm2_feature_concat.pt?download=1"
+)
+
+
+def download_file_if_needed(path: str, url: str, label: str = ""):
+    """
+    指定パスにファイルが無ければ URL からダウンロードする。
+    """
+    if os.path.exists(path):
+        tag = f"[BulkFormer] {label}" if label else "[BulkFormer]"
+        print(f"{tag} file found: {path}")
+        return
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tag = f"[BulkFormer] {label}" if label else "[BulkFormer]"
+
+    print(f"{tag} file not found. Downloading from:\n  {url}")
+    print(f"{tag} Saving to: {path}")
+
+    with urllib.request.urlopen(url) as response, open(path, "wb") as out_f:
+        out_f.write(response.read())
+
+    print(f"{tag} Download finished.")
+
 
 def move_model_to_device(model, device):
     """
-    BulkFormer 内で buffer 登録されていない CPU tensor（inv_freq など）も含めて
-    全 Tensor を強制的に device に移す。
+    Force-move all tensors in the model to the given device, including those
+    not registered as buffers (e.g., inv_freq in Rope).
     """
-
-    # 1. parameters（普通の model.to(device) で移動済みだが念のため）
+    # 1. parameters
     for name, param in model.named_parameters(recurse=True):
         if param is not None:
             model._parameters[name] = param.to(device)
 
-    # 2. buffers（register_buffer されていればこれで移動）
+    # 2. buffers
     for name, buffer in model.named_buffers(recurse=True):
         if buffer is not None:
             model._buffers[name] = buffer.to(device)
 
-    # 3. 直接 Tensor を属性として保持している場合
-    # （BulkFormer や Rope 内の inv_freq がこれ）
+    # 3. attributes directly holding tensors
     for name, value in model.__dict__.items():
         if isinstance(value, torch.Tensor):
             setattr(model, name, value.to(device))
@@ -48,7 +80,7 @@ def load_bulkformer(
     gene_info_path=None,
     high_var_gene_idx_path=None,
 ):
-    # デフォルト値はここで BASE_DIR から組み立てる
+    # Default paths
     if graph_path is None:
         graph_path = os.path.join(BASE_DIR, "data/G_gtex.pt")
     if weights_path is None:
@@ -61,9 +93,13 @@ def load_bulkformer(
         gene_info_path = os.path.join(BASE_DIR, "data/bulkformer_gene_info.csv")
     if high_var_gene_idx_path is None:
         high_var_gene_idx_path = os.path.join(BASE_DIR, "data/high_var_gene_list.pt")
+
+    # ---- 自動ダウンロード ----
+    download_file_if_needed(ckpt_path, CKPT_URL, label="Checkpoint")
+    download_file_if_needed(gene_emb_path, ESM2_URL, label="ESM2 embedding")
+
     """
-    BulkFormer と周辺情報を読み込んで、推論用オブジェクトを返す。
-    log-transformed TPM の DataFrame を渡せばすぐ Embedding を取れるようにする前処理。
+    Load BulkFormer and related objects, and return an inference-ready bundle.
     """
 
     # --- graph / weight / gene embedding ---
@@ -117,11 +153,11 @@ def align_to_bulkformer_genes(X_df, gene_list):
     # 入力側に存在する（=カバーできた）遺伝子
     covered_genes = list(set(gene_list) & set(X_df.columns))
 
-    # ★★★ カバー率をここで Print ★★★
-    print(f"[BulkFormer] Covered genes: {len(covered_genes)} / {len(gene_list)} "
-          f"({len(covered_genes)/len(gene_list)*100:.2f}%)")
-    print(f"[BulkFormer] Missing genes : {len(to_fill_columns)} (filled with -10)")
-    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    # # ★★★ カバー率をここで Print ★★★
+    # print(f"[BulkFormer] Covered genes: {len(covered_genes)} / {len(gene_list)} "
+    #       f"({len(covered_genes)/len(gene_list)*100:.2f}%)")
+    # print(f"[BulkFormer] Missing genes : {len(to_fill_columns)} (filled with -10)")
+    # # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 
     # 欠損遺伝子を -10 で埋める
     padding_df = pd.DataFrame(
@@ -149,6 +185,7 @@ def bulkformer_embed(
     batch_size: int = 32,
     return_expr_value: bool = False,
     device="cpu",
+    is_tqdm=False
 ):
     """
     log-transformed TPM (列: ENSG..., 行: サンプル) から BulkFormer embedding を返す関数。
@@ -198,7 +235,9 @@ def bulkformer_embed(
     expr_tensor = torch.tensor(expr_array, dtype=torch.float32, device=device)
     dataset = TensorDataset(expr_tensor)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    loader = tqdm(loader, total=len(loader))
+
+    if is_tqdm:
+        loader = tqdm(loader, total=len(loader))
 
     all_emb_list = []
     all_expr_value_list = []
